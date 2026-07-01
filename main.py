@@ -1,7 +1,9 @@
-from bot import send_notification
+from bot import send_notification, is_relevant_ai
+
 
 def is_relevant(job):
     return job["price"] >= 200
+
 
 jobs = [
     {"route": "London -> Manchester", "cargo": "furniture", "price": 450, "link": "..."},
@@ -10,10 +12,12 @@ jobs = [
 ]
 
 for job in jobs:
-    print(job["route"], job["price"])
+    if not is_relevant(job):
+        print("Skip (cheap filter):", job["route"])
+        continue
 
-for job in jobs:
-    if is_relevant(job):
+    if is_relevant_ai(job):
         send_notification(job)
-        print("Sended:", job["route"])
-
+        print("Sent (AI approved):", job["route"])
+    else:
+        print("Skip (AI rejected):", job["route"])
