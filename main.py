@@ -1,3 +1,5 @@
+from bot import send_notification
+
 def is_relevant(job):
     return job["price"] >= 200
 
@@ -12,5 +14,6 @@ for job in jobs:
 
 for job in jobs:
     if is_relevant(job):
-        print("Підходить:", job["route"], job["price"])
+        send_notification(job)
+        print("Sended:", job["route"])
 
