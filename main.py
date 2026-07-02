@@ -1,4 +1,5 @@
 from bot import send_notification, is_relevant_ai, already_sent, mark_as_sent
+import time
 
 
 def is_relevant(job):
@@ -11,18 +12,27 @@ jobs = [
     {"route": "Glasgow -> London", "cargo": "piano", "price": 600, "link": "https://example.com/job/3"}
 ]
 
-for job in jobs:
-    if already_sent(job["link"]):
-        print("Already sent, skipping:", job["route"])
-        continue
 
-    if not is_relevant(job):
-        print("Skip (cheap filter):", job["route"])
-        continue
+def check_jobs():
+    for job in jobs:
+        if already_sent(job["link"]):
+            print("Already sent, skipping:", job["route"])
+            continue
 
-    if is_relevant_ai(job):
-        send_notification(job)
-        mark_as_sent(job["link"])
-        print("Sent (AI approved):", job["route"])
-    else:
-        print("Skip (AI rejected):", job["route"])
+        if not is_relevant(job):
+            print("Skip (cheap filter):", job["route"])
+            continue
+
+        if is_relevant_ai(job):
+            send_notification(job)
+            mark_as_sent(job["link"])
+            print("Sent (AI approved):", job["route"])
+        else:
+            print("Skip (AI rejected):", job["route"])
+
+
+while True:
+    print("Checking jobs...")
+    check_jobs()
+    print("Sleeping for 15 minutes...")
+    time.sleep(900)
