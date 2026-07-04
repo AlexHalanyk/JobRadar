@@ -26,6 +26,8 @@ def check_jobs():
 
         ai_decision = is_relevant_ai(job)
         if ai_decision is None:
+            # Don't mark_as_sent here: the LLM call failed (e.g. rate limit),
+            # not the job — retry it next cycle once quota recovers.
             print("Skip (AI error, will retry):", job["title"])
             continue
 
@@ -34,6 +36,8 @@ def check_jobs():
             mark_as_sent(job["link"])
             print("Sent (AI approved):", job["title"])
         else:
+            # Marked sent even though rejected, so a rejected job isn't
+            # re-sent to the LLM (and re-rejected) every cycle.
             mark_as_sent(job["link"])
             print("Skip (AI rejected):", job["title"])
 

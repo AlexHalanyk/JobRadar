@@ -78,11 +78,17 @@ Answer with only one word: YES or NO."""
             contents=prompt
         )
     except Exception as e:
+        # None (not False) signals "couldn't get a decision" so the caller
+        # retries this job next cycle instead of treating it as rejected.
         print("Gemini API error:", e)
         return None
     finally:
+        # Free tier caps Gemini at 5 requests/minute; this keeps every call
+        # (success or failure) under that limit.
         time.sleep(13)
 
+    # The model doesn't always answer with a bare "YES"/"NO" (e.g. "Yes.",
+    # a full sentence), so normalise and check for containment, not equality.
     decision = response.text.strip().upper()
     return "YES" in decision
 
@@ -154,4 +160,6 @@ def check_incoming_messages():
         last_update_id = update["update_id"]
 
     if last_update_id != 0:
+        # Telegram keeps returning already-seen updates until they're
+        # acknowledged; offset+1 marks everything up to here as read.
         requests.get(url, params={"offset": last_update_id + 1})
