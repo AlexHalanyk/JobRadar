@@ -24,7 +24,12 @@ def check_jobs():
             print("Skip (cheap filter):", job["title"])
             continue
 
-        if is_relevant_ai(job):
+        ai_decision = is_relevant_ai(job)
+        if ai_decision is None:
+            print("Skip (AI error, will retry):", job["title"])
+            continue
+
+        if ai_decision:
             send_notification(job)
             mark_as_sent(job["link"])
             print("Sent (AI approved):", job["title"])

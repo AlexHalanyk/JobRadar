@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import requests
 from dotenv import load_dotenv
 from google import genai
@@ -71,10 +72,17 @@ Location: {job['location']}
 Is this a graduate or junior software engineering role in the UK suitable for a CS graduate?
 Answer with only one word: YES or NO."""
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
-    )
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+    except Exception as e:
+        print("Gemini API error:", e)
+        return None
+    finally:
+        time.sleep(13)
+
     decision = response.text.strip().upper()
     return "YES" in decision
 
