@@ -107,10 +107,19 @@ def is_relevant_ai_ollama(job):
     try:
         response = requests.post(
             f"{OLLAMA_URL}/api/generate",
-            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=120,  # CPU inference is slow
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "think": False,
+                "options": {"num_predict": 5},
+            },
+            timeout=300,  # CPU inference is slow
         )
-        decision = response.json()["response"].strip().upper()
+        text = response.json().get("response")
+        if not text:
+            raise ValueError("empty or missing 'response' field")
+        decision = text.strip().upper()
     except Exception as e:
         # Same contract as is_relevant_ai: None means "couldn't get a
         # decision", so the caller retries the job next cycle.
