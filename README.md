@@ -11,12 +11,31 @@ reward whoever applies first, so the bot watches the primary source (the same
 API a company's careers page is rendered from) instead of waiting for Indeed
 or weekly digest emails.
 
+## Highlights
+
+- Runs 24/7 in production on self-hosted infrastructure (Nutanix VM, Docker)
+- Local→cloud LLM cascade: 100% precision on a 70-title golden set
+- 64 automated tests, CI on every push
+- Zero-redeploy company onboarding: send a Greenhouse slug in chat
+- Per-subscriber free-text filter profiles
+
+```mermaid
+flowchart LR
+    A[Greenhouse ATS API] --> B[Dedup<br/>link + profile]
+    B --> C[Keyword prefilter]
+    C --> D[Gemma 4 12B<br/>local, unlimited]
+    D -- YES --> E[Gemini 2.5 Flash<br/>cloud]
+    D -- NO --> X[drop]
+    E -- YES --> F[Telegram notification<br/>per subscriber profile]
+```
+
 ## Features
 
 - Monitors company ATS boards directly (Greenhouse for now), checking every
   15 minutes — often ahead of job aggregators.
-- Two-stage filtering keeps LLM costs near zero: a keyword prefilter, then a
-  Gemini 2.5 Flash relevance check for survivors.
+- Three-gate filtering pipeline keeps cloud LLM cost near zero: dedup, then a
+  keyword prefilter, then an LLM relevance cascade (self-hosted Gemma first,
+  Gemini 2.5 Flash to confirm) for survivors.
 - Self-service via chat: `/start` to subscribe, or send a Greenhouse slug or
   URL (e.g. `monzo`) to add a company to the watchlist — no redeploy needed.
 - Per-subscriber filter profiles: `/profile <text>` lets each subscriber
@@ -29,21 +48,35 @@ or weekly digest emails.
 
 ## Architecture
 
-- `main.py` — the main loop: every 15 minutes, fetch jobs, filter, notify,
-  and poll for incoming Telegram messages.
-- `bot.py` — services: sending/receiving Telegram messages, the Gemini LLM
-  relevance check, and SQLite persistence (sent jobs, subscribers, tracked
-  companies).
-- `sources.py` — ATS fetchers (currently Greenhouse's public board API),
-  normalising job fields into a common shape (title, company, location,
-  link, id).
+- `main.py` — runs two schedules: incoming Telegram messages are polled
+  every 10 seconds (for chat responsiveness), while job boards are checked
+  every 15 minutes.
+- `bot.py` — services: sending/receiving Telegram messages, the Ollama
+  client (local Gemma) and Gemini client (cloud), and SQLite persistence
+  (sent jobs, subscribers, tracked companies).
+- `sources.py` — ATS fetchers (Greenhouse, Lever, Workday), normalising job
+  fields into a common shape (title, company, location, link, id). Workday
+  support uses the internal CXS endpoint career sites themselves call to
+  render job listings — there's no public API for it, so this is
+  undocumented and may change without notice.
+- `eval_filter.py` — offline benchmark against `golden_set.csv`, reporting
+  accuracy/precision/recall per backend along with false positive/negative
+  lists; run a single backend with `--backend`.
 
-**Two-stage filtering**: a cheap keyword filter drops obviously irrelevant
-titles without an API call. Survivors go to Gemini 2.5 Flash with a YES/NO
-prompt asking whether the role is a graduate/junior SWE role suitable for a
-UK CS graduate. LLM output is never trusted blindly — it's normalised
-(`strip`/`upper`/substring check) since the model occasionally returns
-`YES.`, `Yes`, or a full sentence instead of one word.
+**Three-gate filtering pipeline**: a job first passes dedup (has this link
+already been evaluated for this subscriber profile?), then a cheap keyword
+filter drops obviously irrelevant titles without an API call. Survivors go
+to an LLM relevance cascade: a self-hosted Gemma 4 12B (via Ollama, free and
+unlimited) screens first, and only its YES verdicts are confirmed by Gemini
+2.5 Flash. This was designed to keep cloud API usage minimal while
+preserving cloud-level precision — Gemini's free tier caps out at 5
+requests/minute, which motivated the design; the bot now runs on a paid
+tier, but the cascade still cuts cloud costs to near zero. The backend is
+switchable via `LLM_BACKEND=gemini|ollama|cascade`. LLM output is never
+trusted blindly — it's normalised (`strip`/`upper`/substring check) since
+the model occasionally returns `YES.`, `Yes`, or a full sentence instead of
+one word, and API errors are skipped and retried next cycle rather than
+treated as a rejection.
 
 **Dedup via SQLite**: processed job links are stored in the `sent_jobs`
 table so a job is only ever evaluated and sent once. The database lives in a
@@ -71,8 +104,8 @@ reproduce or rerun the benchmark.
 ## Tech stack
 
 Python · SQLite · Docker / docker-compose · Telegram Bot API ·
-Google Gemini API · Greenhouse ATS API. Deployed on a Nutanix AHV VM
-(git-based deploys: push → pull → rebuild).
+Google Gemini API · Ollama · Gemma 4 12B · Greenhouse ATS API. Deployed on a
+Nutanix AHV VM (git-based deploys: push → pull → rebuild).
 
 ## Setup
 
@@ -80,6 +113,12 @@ Environment variables (put them in `.env`, see `.env.example`):
 
 - `TELEGRAM_TOKEN` — Telegram bot token from BotFather
 - `GEMINI_API_KEY` — Google Gemini API key
+- `LLM_BACKEND` — `gemini` (default), `ollama`, or `cascade`; see
+  Architecture above for what each mode runs
+- `OLLAMA_URL` — base URL of a reachable Ollama host (required for
+  `ollama`/`cascade` backends)
+- `OLLAMA_MODEL` — Ollama model name (defaults to `gemma4:12b`; required
+  for `ollama`/`cascade` backends)
 
 ```
 git clone https://github.com/AlexHalanyk/JobRadar.git
@@ -90,6 +129,6 @@ docker compose up --build -d
 
 ## Roadmap
 
-- Workday adapter for enterprise employers (banks, consultancies)
-- Self-hosted LLM via Ollama, as a cost/quality comparison against hosted Gemini
-- Mobile client
+- [ ] Workday adapter for enterprise employers (banks, consultancies)
+- [ ] Additional ATS adapters (Lever, Ashby, Workable)
+- [ ] Mobile client

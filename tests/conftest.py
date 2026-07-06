@@ -40,7 +40,15 @@ def isolated_db(tmp_path, monkeypatch):
             first_name TEXT
         )
     """)
-    cursor.execute("CREATE TABLE companies (slug TEXT PRIMARY KEY)")
+    cursor.execute("""
+        CREATE TABLE companies (
+            slug TEXT PRIMARY KEY,
+            ats TEXT NOT NULL DEFAULT 'greenhouse',
+            tenant TEXT,
+            site TEXT,
+            host TEXT
+        )
+    """)
     conn.commit()
 
     monkeypatch.setattr(bot, "db", conn)

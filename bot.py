@@ -99,6 +99,31 @@ db_cursor.execute("""
     )
 """)
 
+
+def _migrate_companies_schema(cursor, conn):
+    # Additive-only migration: existing rows get the default ATS via the
+    # column's own DEFAULT, so no separate backfill pass is needed.
+    cursor.execute("PRAGMA table_info(companies)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if "ats" not in existing_columns:
+        cursor.execute("ALTER TABLE companies ADD COLUMN ats TEXT NOT NULL DEFAULT 'greenhouse'")
+        existing_columns.add("ats")
+    # tenant/site/host are only populated for Workday companies; NULL for
+    # everything else, so no default/backfill value makes sense here.
+    if "tenant" not in existing_columns:
+        cursor.execute("ALTER TABLE companies ADD COLUMN tenant TEXT")
+        existing_columns.add("tenant")
+    if "site" not in existing_columns:
+        cursor.execute("ALTER TABLE companies ADD COLUMN site TEXT")
+        existing_columns.add("site")
+    if "host" not in existing_columns:
+        cursor.execute("ALTER TABLE companies ADD COLUMN host TEXT")
+        existing_columns.add("host")
+    conn.commit()
+
+
+_migrate_companies_schema(db_cursor, db)
+
 db_cursor.execute("SELECT COUNT(*) FROM companies")
 if db_cursor.fetchone()[0] == 0:
     db_cursor.executemany(
@@ -117,6 +142,47 @@ def extract_greenhouse_slug(text):
     if BARE_SLUG_RE.fullmatch(text):
         return text
     return None
+
+
+# "workday:{tenant}:{site}" has no way to express the host, since wd1 is by
+# far the most common; a full careers URL (which encodes the real host) is
+# the fallback for tenants on wd3/wd5.
+WORKDAY_DEFAULT_HOST = "wd1"
+WORKDAY_SHORTHAND_RE = re.compile(r"^workday:([a-zA-Z0-9-]+):([a-zA-Z0-9_-]+)$")
+WORKDAY_URL_RE = re.compile(
+    r"https?://(?P<tenant>[a-zA-Z0-9-]+)\.(?P<host>wd\d+)\.myworkdayjobs\.com/(?P<path>[^\s?#]+)"
+)
+_WORKDAY_LOCALE_SEGMENT_RE = re.compile(r"^[a-z]{2}(-[A-Z]{2})?$")
+
+
+def _parse_workday_url(text):
+    match = WORKDAY_URL_RE.search(text)
+    if not match:
+        return None
+
+    segments = [segment for segment in match.group("path").split("/") if segment]
+    if not segments:
+        return None
+
+    # Some tenants prefix the site with a locale segment (e.g. "en-US/External").
+    if len(segments) > 1 and _WORKDAY_LOCALE_SEGMENT_RE.match(segments[0]):
+        site = segments[1]
+    else:
+        site = segments[0]
+
+    return {"tenant": match.group("tenant"), "host": match.group("host"), "site": site}
+
+
+def _parse_workday_shorthand(text):
+    match = WORKDAY_SHORTHAND_RE.match(text)
+    if not match:
+        return None
+    tenant, site = match.groups()
+    return {"tenant": tenant, "host": WORKDAY_DEFAULT_HOST, "site": site}
+
+
+def extract_workday_company(text):
+    return _parse_workday_url(text) or _parse_workday_shorthand(text)
 
 
 def send_message(chat_id, text):
@@ -258,8 +324,11 @@ def get_subscribers_for_profile(profile):
     return [row[0] for row in db_cursor.fetchall()]
 
 
-def add_company(slug):
-    db_cursor.execute("INSERT OR IGNORE INTO companies (slug) VALUES (?)", (slug,))
+def add_company(slug, ats="greenhouse", tenant=None, site=None, host=None):
+    db_cursor.execute(
+        "INSERT OR IGNORE INTO companies (slug, ats, tenant, site, host) VALUES (?, ?, ?, ?, ?)",
+        (slug, ats, tenant, site, host),
+    )
     db.commit()
 
 
@@ -268,10 +337,48 @@ def get_companies():
     return [row[0] for row in db_cursor.fetchall()]
 
 
+def get_company_ats(slug):
+    db_cursor.execute("SELECT ats FROM companies WHERE slug = ?", (slug,))
+    row = db_cursor.fetchone()
+    return row[0] if row and row[0] else "greenhouse"
+
+
+def get_company_workday_info(slug):
+    db_cursor.execute("SELECT tenant, site, host FROM companies WHERE slug = ?", (slug,))
+    row = db_cursor.fetchone()
+    if row is None or None in row:
+        return None
+    tenant, site, host = row
+    return {"tenant": tenant, "site": site, "host": host}
+
+
 def is_valid_greenhouse_board(slug):
     url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
     try:
         response = requests.get(url, timeout=10)
+    except requests.RequestException:
+        return False
+    return response.status_code == 200
+
+
+def is_valid_lever_board(slug):
+    url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
+    try:
+        response = requests.get(url, timeout=10)
+    except requests.RequestException:
+        return False
+    return response.status_code == 200
+
+
+def is_valid_workday_board(tenant, site, host):
+    url = f"https://{tenant}.{host}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"
+    try:
+        response = requests.post(
+            url,
+            json={"appliedFacets": {}, "limit": 1, "offset": 0, "searchText": ""},
+            headers={"Accept": "application/json"},
+            timeout=10,
+        )
     except requests.RequestException:
         return False
     return response.status_code == 200
@@ -336,14 +443,39 @@ def check_incoming_messages(start_time):
                 else:
                     send_message(chat_id, f"Current profile:\n{get_profile(chat_id)}")
             else:
-                slug = extract_greenhouse_slug(text)
-                if slug is not None:
-                    if is_valid_greenhouse_board(slug):
-                        add_company(slug)
-                        send_message(chat_id, f"✅ {slug} added, now tracking")
-                        print("New company tracked:", slug)
+                # Workday inputs ("workday:tenant:site" or a myworkdayjobs.com
+                # URL) have a distinct shape that never overlaps with a bare
+                # Greenhouse/Lever slug, so check for one first.
+                workday_company = extract_workday_company(text)
+                if workday_company is not None:
+                    tenant = workday_company["tenant"]
+                    site = workday_company["site"]
+                    host = workday_company["host"]
+                    if is_valid_workday_board(tenant, site, host):
+                        company_slug = f"{tenant}:{site}"
+                        add_company(company_slug, "workday", tenant=tenant, site=site, host=host)
+                        send_message(chat_id, f"✅ {company_slug} added, now tracking (Workday)")
+                        print("New company tracked:", company_slug, "(workday)")
                     else:
-                        send_message(chat_id, f"❌ Board not found: {slug}")
+                        send_message(chat_id, f"❌ Workday board not found: {tenant}/{site}")
+                else:
+                    slug = extract_greenhouse_slug(text)
+                    if slug is not None:
+                        # An explicit Greenhouse URL already tells us the ATS,
+                        # so there's no ambiguity to resolve — don't probe
+                        # Lever too.
+                        is_greenhouse_url = GREENHOUSE_SLUG_RE.search(text) is not None
+
+                        if is_valid_greenhouse_board(slug):
+                            add_company(slug, "greenhouse")
+                            send_message(chat_id, f"✅ {slug} added, now tracking (Greenhouse)")
+                            print("New company tracked:", slug, "(greenhouse)")
+                        elif not is_greenhouse_url and is_valid_lever_board(slug):
+                            add_company(slug, "lever")
+                            send_message(chat_id, f"✅ {slug} added, now tracking (Lever)")
+                            print("New company tracked:", slug, "(lever)")
+                        else:
+                            send_message(chat_id, f"❌ Board not found: {slug}")
 
         last_update_id = update["update_id"]
 

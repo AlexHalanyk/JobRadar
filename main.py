@@ -6,12 +6,14 @@ from bot import (
     mark_as_sent,
     check_incoming_messages,
     get_companies,
+    get_company_ats,
+    get_company_workday_info,
     get_distinct_profiles,
     get_subscribers_for_profile,
     DEFAULT_PROFILE,
     LLM_BACKEND,
 )
-from sources import fetch_greenhouse_jobs
+from sources import fetch_greenhouse_jobs, fetch_lever_jobs, fetch_workday_jobs
 import time
 
 KEYWORDS = [
@@ -97,7 +99,15 @@ def evaluate_job_for_profile(job, profile):
 def check_jobs():
     jobs = []
     for slug in get_companies():
-        jobs += fetch_greenhouse_jobs(slug)
+        ats = get_company_ats(slug)
+        if ats == "lever":
+            jobs += fetch_lever_jobs(slug)
+        elif ats == "workday":
+            workday_info = get_company_workday_info(slug)
+            if workday_info is not None:
+                jobs += fetch_workday_jobs(workday_info)
+        else:
+            jobs += fetch_greenhouse_jobs(slug)
 
     profiles = get_active_profiles()
 

@@ -133,3 +133,84 @@ def test_subscribers_migration_is_idempotent(tmp_path):
     assert column_names.count("first_name") == 1
 
     conn.close()
+
+
+def test_companies_migration_adds_ats_column_and_backfills_default(tmp_path):
+    db_path = tmp_path / "pre_ats_companies.db"
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE companies (slug TEXT PRIMARY KEY)")
+    cursor.execute("INSERT INTO companies (slug) VALUES (?)", ("monzo",))
+    conn.commit()
+
+    bot._migrate_companies_schema(cursor, conn)
+
+    cursor.execute("PRAGMA table_info(companies)")
+    columns = {row[1] for row in cursor.fetchall()}
+    assert "ats" in columns
+
+    cursor.execute("SELECT ats FROM companies WHERE slug = ?", ("monzo",))
+    assert cursor.fetchone() == ("greenhouse",)
+
+    conn.close()
+
+
+def test_companies_migration_adds_workday_columns_as_null_for_existing_rows(tmp_path):
+    db_path = tmp_path / "pre_workday_companies.db"
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE companies (slug TEXT PRIMARY KEY)")
+    cursor.execute("INSERT INTO companies (slug) VALUES (?)", ("monzo",))
+    conn.commit()
+
+    bot._migrate_companies_schema(cursor, conn)
+
+    cursor.execute("PRAGMA table_info(companies)")
+    columns = {row[1] for row in cursor.fetchall()}
+    assert {"tenant", "site", "host"} <= columns
+
+    cursor.execute("SELECT tenant, site, host FROM companies WHERE slug = ?", ("monzo",))
+    assert cursor.fetchone() == (None, None, None)
+
+    conn.close()
+
+
+def test_companies_migration_allows_storing_workday_details(tmp_path):
+    db_path = tmp_path / "workday_companies.db"
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE companies (slug TEXT PRIMARY KEY)")
+    conn.commit()
+
+    bot._migrate_companies_schema(cursor, conn)
+
+    cursor.execute(
+        "INSERT INTO companies (slug, ats, tenant, site, host) VALUES (?, ?, ?, ?, ?)",
+        ("acme:External", "workday", "acme", "External", "wd3"),
+    )
+    conn.commit()
+
+    cursor.execute("SELECT ats, tenant, site, host FROM companies WHERE slug = ?", ("acme:External",))
+    assert cursor.fetchone() == ("workday", "acme", "External", "wd3")
+
+    conn.close()
+
+
+def test_companies_migration_is_idempotent(tmp_path):
+    db_path = tmp_path / "new_companies.db"
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE companies (slug TEXT PRIMARY KEY)")
+    conn.commit()
+
+    bot._migrate_companies_schema(cursor, conn)
+    bot._migrate_companies_schema(cursor, conn)  # must not raise or duplicate columns
+
+    cursor.execute("PRAGMA table_info(companies)")
+    column_names = [row[1] for row in cursor.fetchall()]
+    assert column_names.count("ats") == 1
+    assert column_names.count("tenant") == 1
+    assert column_names.count("site") == 1
+    assert column_names.count("host") == 1
+
+    conn.close()
